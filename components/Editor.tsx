@@ -13,6 +13,7 @@ import {
 import {
   Article,
   BookOpenText,
+  Link,
   PencilSimpleLine,
   Sparkle,
   Swap,
@@ -20,9 +21,17 @@ import {
 } from "@phosphor-icons/react";
 import { useEditor, EditorContent, BubbleMenu } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
-import { useCompletion } from "ai/react";
+import LinkExtension from "@tiptap/extension-link";
+import { Markdown } from "tiptap-markdown";
+import { useCompletion, experimental_useObject as useObject } from "ai/react";
 import { useEffect, useState } from "react";
-import { adjustSelectionToWholeWords, Selection } from "@/utils/selection";
+import {
+  adjustSelectionToWholeWords,
+  replaceLinks,
+  Selection,
+} from "@/utils/selection";
+import { RequestOptions } from "ai";
+import { linksSchema, LinksTable, LinksType } from "@/components/LinksTable";
 
 const content = `
 <h2>
@@ -36,24 +45,40 @@ const content = `
 
 export const Editor = () => {
   const [currentSelection, setCurrentSelection] = useState<Selection | null>();
-  const [aiContent, setAiContent] = useState("");
+  const [aiToolsContent, setAiToolsContent] = useState("");
+  const [aiLinksContent, setAiLinksContent] = useState<LinksType | null>();
 
   const editor = useEditor({
-    extensions: [StarterKit],
+    extensions: [StarterKit, Markdown, LinkExtension],
     content,
   });
 
-  const { completion, complete, isLoading } = useCompletion({
+  const {
+    completion: aiToolsCompletion,
+    complete: aiToolsComplete,
+    isLoading: aiToolsIsLoading,
+  } = useCompletion({
     api: "/api/ai",
-    onError: (e) => {
-      // TODO: Handle errors
-      console.log(e);
-    },
   });
 
   useEffect(() => {
-    setAiContent(completion);
-  }, [completion]);
+    setAiToolsContent(aiToolsCompletion);
+  }, [aiToolsCompletion]);
+
+  const {
+    object: aiLinksCompletion,
+    submit: aiLinksComplete,
+    isLoading: aiLinksIsLoading,
+  } = useObject({
+    api: "/api/ai/links",
+    schema: linksSchema,
+  });
+
+  useEffect(() => {
+    if ((aiLinksCompletion?.links ?? [])?.length > 0) {
+      setAiLinksContent(aiLinksCompletion as LinksType);
+    }
+  }, [aiLinksCompletion]);
 
   const getCurrentSelectionText = () => {
     if (!currentSelection) return;
@@ -67,7 +92,13 @@ export const Editor = () => {
     return text;
   };
 
-  const getAiResponse = (prompt: string) => {
+  const getAiResponse = (
+    prompt: string,
+    complete: (
+      prompt: string,
+      options?: RequestOptions
+    ) => Promise<string | null | undefined>
+  ) => {
     if (!currentSelection) return;
 
     complete(prompt, {
@@ -78,7 +109,14 @@ export const Editor = () => {
     });
   };
 
-  const hasCompletion = aiContent.length > 0;
+  const resetAll = () => {
+    setCurrentSelection(null);
+    setAiToolsContent("");
+    setAiLinksContent(null);
+  };
+
+  const hasAiToolsCompletion = aiToolsContent.length > 0;
+  const hasAiLinksCompletion = (aiLinksContent?.links ?? [])?.length > 0;
 
   return (
     <Container size="sm">
@@ -97,20 +135,18 @@ export const Editor = () => {
         editor={editor}
         tippyOptions={{
           placement: "auto",
-          onDestroy: () => {
-            setCurrentSelection(null);
-            setAiContent("");
-          },
+          onClickOutside: resetAll,
+          onDestroy: resetAll,
         }}
       >
         <Card withBorder p={0}>
-          {hasCompletion && (
+          {hasAiToolsCompletion && (
             <div className="flex max-h-[400px]">
               <Stack gap="xs" className="w-full">
                 <ScrollArea.Autosize>
-                  <div className="p-4 text-xs">{aiContent}</div>
+                  <div className="p-4 text-xs">{aiToolsContent}</div>
                 </ScrollArea.Autosize>
-                {!isLoading && (
+                {!aiToolsIsLoading && (
                   <Group justify="right" p="sm" gap="xs">
                     <Button
                       size="xs"
@@ -118,7 +154,7 @@ export const Editor = () => {
                       leftSection={<Trash />}
                       onClick={() => {
                         setCurrentSelection(null);
-                        setAiContent("");
+                        setAiToolsContent("");
 
                         editor!.commands.selectTextblockEnd();
                         editor!.commands.blur();
@@ -140,12 +176,12 @@ export const Editor = () => {
                               from: currentSelection.from,
                               to: currentSelection.to,
                             },
-                            completion
+                            aiToolsCompletion
                           )
                           .run();
 
                         setCurrentSelection(null);
-                        setAiContent("");
+                        setAiToolsContent("");
                       }}
                     >
                       Replace
@@ -155,7 +191,35 @@ export const Editor = () => {
               </Stack>
             </div>
           )}
-          {isLoading && !hasCompletion && (
+          {hasAiLinksCompletion && (
+            <LinksTable
+              links={aiLinksContent?.links ?? []}
+              onSelectionChange={(selectedLinks) => {
+                if (!currentSelection) return;
+
+                const currentSelectionText = getCurrentSelectionText();
+                const prevSelection = {
+                  from: editor!.state.selection.from,
+                  to: editor!.state.selection.to,
+                };
+
+                editor!
+                  .chain()
+                  .insertContentAt(
+                    {
+                      from: currentSelection.from,
+                      to: currentSelection.to,
+                    },
+                    replaceLinks(currentSelectionText ?? "", selectedLinks)
+                  )
+                  .setTextSelection(prevSelection)
+                  .focus()
+                  .run();
+              }}
+            />
+          )}
+          {((aiToolsIsLoading && !hasAiToolsCompletion) ||
+            (aiLinksIsLoading && !hasAiLinksCompletion)) && (
             <Group
               className="h-12 w-full px-4 text-xs font-medium text-blue-600"
               justify="space-between"
@@ -168,45 +232,63 @@ export const Editor = () => {
               <Loader size="xs" />
             </Group>
           )}
-          {!isLoading && !hasCompletion && (
-            <Menu shadow="md" width={200}>
-              <Menu.Target>
+          {!aiToolsIsLoading &&
+            !hasAiToolsCompletion &&
+            !aiLinksIsLoading &&
+            !hasAiLinksCompletion && (
+              <Group gap={0}>
+                <Menu shadow="md" width={200}>
+                  <Menu.Target>
+                    <Button
+                      size="xs"
+                      variant="transparent"
+                      leftSection={<Sparkle />}
+                    >
+                      AI Tools
+                    </Button>
+                  </Menu.Target>
+                  <Menu.Dropdown>
+                    <Menu.Item
+                      leftSection={<PencilSimpleLine />}
+                      onClick={() => {
+                        getAiResponse("rewrite", aiToolsComplete);
+                      }}
+                    >
+                      Re-write
+                    </Menu.Item>
+                    <Menu.Item
+                      leftSection={<Article />}
+                      onClick={() => {
+                        getAiResponse("shorter", aiToolsComplete);
+                      }}
+                    >
+                      Make Shorter
+                    </Menu.Item>
+                    <Menu.Item
+                      leftSection={<BookOpenText />}
+                      onClick={() => {
+                        getAiResponse("longer", aiToolsComplete);
+                      }}
+                    >
+                      Make Longer
+                    </Menu.Item>
+                  </Menu.Dropdown>
+                </Menu>
                 <Button
                   size="xs"
                   variant="transparent"
-                  leftSection={<Sparkle />}
+                  leftSection={<Link />}
+                  onClick={() => {
+                    aiLinksComplete({
+                      selection: getCurrentSelectionText(),
+                      context: editor!.view.state.doc.textContent,
+                    });
+                  }}
                 >
-                  AI Tools
+                  External Links
                 </Button>
-              </Menu.Target>
-              <Menu.Dropdown>
-                <Menu.Item
-                  leftSection={<PencilSimpleLine />}
-                  onClick={() => {
-                    getAiResponse("rewrite");
-                  }}
-                >
-                  Re-write
-                </Menu.Item>
-                <Menu.Item
-                  leftSection={<Article />}
-                  onClick={() => {
-                    getAiResponse("shorter");
-                  }}
-                >
-                  Make Shorter
-                </Menu.Item>
-                <Menu.Item
-                  leftSection={<BookOpenText />}
-                  onClick={() => {
-                    getAiResponse("longer");
-                  }}
-                >
-                  Make Longer
-                </Menu.Item>
-              </Menu.Dropdown>
-            </Menu>
-          )}
+              </Group>
+            )}
         </Card>
       </BubbleMenu>
     </Container>

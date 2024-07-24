@@ -1,3 +1,4 @@
+import { LinkType } from "@/components/LinksTable";
 import { Editor } from "@tiptap/react";
 
 export type Selection = {
@@ -24,4 +25,35 @@ export const adjustSelectionToWholeWords = (editor: Editor): Selection => {
   }
 
   return { from: start, to: end };
+};
+
+export const replaceLinks = (selectedText: string, links: LinkType[]) => {
+  if (links.length === 0) {
+    return selectedText.replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1");
+  }
+
+  // find and remove existing markdown links that are not in the links array
+  let updatedText = selectedText.replace(
+    /\[([^\]]+)\]\(([^)]+)\)/g,
+    (match, text, linkUrl) => {
+      if (links.some((link) => link.url === linkUrl)) {
+        return match;
+      }
+
+      return text;
+    }
+  );
+
+  // replace anchor texts with markdown links
+  links.forEach((link) => {
+    const regex = new RegExp(
+      `\\b${link.anchorText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`
+    );
+    updatedText = updatedText.replace(
+      regex,
+      `[${link.anchorText}](${link.url})`
+    );
+  });
+
+  return updatedText;
 };
